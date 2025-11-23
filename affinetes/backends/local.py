@@ -576,7 +576,8 @@ class LocalBackend(AbstractBackend):
                 **kwargs
             )
         except Exception as e:
-            raise BackendError(f"Method call failed: {e}")
+            # Preserve full exception chain for debugging
+            raise BackendError(f"Method call failed: {e}") from e
     
     async def list_methods(self) -> list:
         """

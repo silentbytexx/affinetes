@@ -243,9 +243,10 @@ class EnvironmentWrapper:
                     f"Method '{name}' on environment '{self.name}' timed out after {_timeout}s"
                 )
             except Exception as e:
+                # Preserve full exception chain for debugging
                 raise EnvironmentError(
                     f"Method '{name}' failed on environment '{self.name}': {e}"
-                )
+                ) from e
         
         return method_caller
     
