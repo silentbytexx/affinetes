@@ -1,6 +1,7 @@
 """Number Guessing interactive environment"""
 
 import os
+import time
 import httpx
 import openai
 import random
@@ -80,6 +81,7 @@ class Actor:
             seed = random.randint(0, 2**32 - 1)
         
         current_api_key = api_key or self.api_key
+        start = time.time()
         
         # Generate target number
         random.seed(task_id if task_id is not None else random.randint(0, 2**31 - 1))
@@ -150,6 +152,7 @@ What is your next guess?"""
             "task_name": "game:number_guess",
             "score": 1.0 if success else 0.0,
             "success": success,
+            "time_taken": time.time() - start,
             "extra": {
                 "conversation": conversation,
                 "seed": seed,
