@@ -244,8 +244,11 @@ class EnvironmentWrapper:
                 )
             except Exception as e:
                 # Preserve full exception chain for debugging
+                import traceback
+                error_details = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
                 raise EnvironmentError(
-                    f"Method '{name}' failed on environment '{self.name}': {e}"
+                    f"Method '{name}' failed on environment '{self.name}': {type(e).__name__}: {e}\n"
+                    f"Full traceback:\n{error_details}"
                 ) from e
         
         return method_caller

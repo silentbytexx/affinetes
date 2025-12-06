@@ -10,12 +10,28 @@ import affinetes as af_env
 from typing import Dict, List
 
 # Registry configuration
-REGISTRY = "docker.io/bignickeye"
+REGISTRY = "docker.io/affinefoundation"
 
 ENV_CONFIGS = {
+    "cde": {
+        "path": "environments/primeintellect/cde",
+        "image": "primeintellect:cde",
+    },
+    "lgc": {
+        "path": "environments/primeintellect/lgc",
+        "image": "primeintellect:lgc",
+    },
+    "mth": {
+        "path": "environments/primeintellect/mth",
+        "image": "primeintellect:mth",
+    },
+    "sci": {
+        "path": "environments/primeintellect/sci",
+        "image": "primeintellect:sci",
+    },
     "affine": {
         "path": "environments/affine",
-        "image": "affine:latest",
+        "image": "affine-env:v4",
     },
     "agentgym:webshop": {
         "path": "environments/agentgym",

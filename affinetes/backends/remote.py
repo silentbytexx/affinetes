@@ -91,9 +91,9 @@ class BasilicaBackend(AbstractBackend):
         except httpx.HTTPStatusError as e:
             raise BackendError(
                 f"Basilica HTTP {e.response.status_code}: {e.response.text}"
-            )
+            ) from e
         except Exception as e:
-            raise BackendError(f"Failed to call method '{method_name}': {e}")
+            raise BackendError(f"Failed to call method '{method_name}': {e}") from e
     
     async def list_methods(self) -> list:
         """
