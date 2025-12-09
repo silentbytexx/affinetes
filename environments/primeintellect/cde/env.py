@@ -118,8 +118,9 @@ class Actor:
         
         # Evaluate
         score = 0.0
+        test_result = "0/0"
         if resp:
-            score = await self.code_task.evaluate(resp, challenge)
+            score, test_result = await self.code_task.evaluate(resp, challenge)
 
         conversation = [
             {"role": "user", "content": challenge.prompt},
@@ -127,15 +128,15 @@ class Actor:
         ]
 
         result = {
-            "task_name": "code:intellect-3-rl",
+            "task_name": "CDE",
             "score": score,
             "success": score > 0,
             "time_taken": time.time() - start,
             "extra": {
                 "conversation": conversation,
                 "seed": seed,
+                "test_result": test_result,  # Format: "passed/total" (e.g., "7/15")
                 "test_cases": challenge.extra.get("tests", ""),
-                "source": challenge.extra.get("source", ""),
                 "dataset_index": challenge.extra.get("dataset_index")
             }
         }
