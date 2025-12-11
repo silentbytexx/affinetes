@@ -31,6 +31,7 @@ COPY . .
 
 # Set environment variable for logging
 ENV I3_CODE_LOG_LEVEL=INFO
+ENV UVICORN_WORKERS=1
 
 # Default command runs the actor
 CMD ["python", "-m", "env"]

@@ -1,19 +1,16 @@
 """Code task generator and evaluator using code execution"""
 
 import asyncio
+import gc
 import json
 import logging
 import os
 import re
 import signal
-import subprocess
 import sys
 import tempfile
-from typing import Callable
 
-import httpx
 from datasets import load_dataset
-from openai import AsyncOpenAI
 
 sys.path.insert(0, '/app')
 from models import Challenge
@@ -21,14 +18,6 @@ from utils import (
     BASE_IMPORTS,
     generate_function_wrapper,
     compare_stdout_results,
-    compare_function_results,
-)
-
-# We set higher timeouts than default to avoid judge timeout during eval
-HTTPX_TIMEOUT = httpx.Timeout(1200)
-HTTPX_LIMITS = httpx.Limits(
-    max_connections=8192,
-    max_keepalive_connections=8192,
 )
 
 logger = logging.getLogger("i3_code")
@@ -45,10 +34,18 @@ INSTRUCTION_PROMPT = "Solve the programming task below in a Python markdown code
 # Default timeout per test case (seconds)
 DEFAULT_TEST_TIMEOUT = 20
 
-# Maximum concurrent subprocesses to prevent memory exhaustion
-# Each subprocess can use ~500-600MB with numpy/pandas imports
-# Limiting to 3 keeps memory under ~2GB for test execution
-MAX_CONCURRENT_TESTS = 3
+# Memory limit per subprocess in MB (prevent container OOM)
+SUBPROCESS_MEMORY_LIMIT_MB = 1024
+
+# Global semaphore for test concurrency control (lazy initialization)
+_GLOBAL_TEST_SEMAPHORE = None
+
+def _get_semaphore():
+    """Get or create global test semaphore"""
+    global _GLOBAL_TEST_SEMAPHORE
+    if _GLOBAL_TEST_SEMAPHORE is None:
+        _GLOBAL_TEST_SEMAPHORE = asyncio.Semaphore(5)
+    return _GLOBAL_TEST_SEMAPHORE
 
 
 
@@ -220,17 +217,14 @@ class CodeTask:
         total = len(inputs)
         results = []
         
-        # Use semaphore to limit concurrent subprocesses
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TESTS)
-        
         async def run_test_with_semaphore(i):
-            """Run a single test with semaphore to limit concurrency"""
-            async with semaphore:
+            """Run a single test with global semaphore to limit concurrency"""
+            async with _get_semaphore():
                 try:
                     # Parse input and output (they are JSON strings)
                     test_input = json.loads(inputs[i])
                     expected_output = json.loads(outputs[i])
-                    
+
                     if use_function_mode:
                         # Function call mode - pass JSON string for expected_output
                         # to match original project's comparison logic
@@ -267,27 +261,91 @@ class CodeTask:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # Count passed tests
-        passed = 0
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.debug(f"Test {i}: EXCEPTION - {result}")
-            elif result is True:
-                passed += 1
-                logger.debug(f"Test {i}: PASSED")
-            else:
-                logger.debug(f"Test {i}: FAILED")
+        passed = sum(1 for r in results if r is True)
+        score = 1.0 if passed == total else 0.0
         
-        # Calculate score (binary: 1.0 if all pass, else 0.0)
-        pass_rate = passed / total if total > 0 else 0.0
-        passed_all = (pass_rate == 1.0)
-        score = 1.0 if passed_all else 0.0
-        
-        # Format test result as "passed/total"
         test_result = f"{passed}/{total}"
-        
-        logger.info(f"Evaluation complete: {test_result} tests passed, pass_rate={pass_rate:.2%}, score={score}")
+        task_id = challenge.extra.get("task_id")
+        logger.info(f"Evaluation complete: task_id={task_id}, {test_result}, score={score}")
         
         return score, test_result
+    
+    async def _run_test_subprocess(
+        self,
+        code: str,
+        timeout: int,
+        test_index: int,
+        stdin_input: str = None
+    ) -> tuple[asyncio.subprocess.Process, bytes, bytes]:
+        """
+        Run code in subprocess with memory monitoring
+        
+        Returns:
+            (process, stdout, stderr)
+        """
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(f"{BASE_IMPORTS}\n{code}")
+            temp_file = f.name
+        
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                'python3', temp_file,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                preexec_fn=lambda: self._set_process_limits() if hasattr(os, 'setrlimit') else None
+            )
+            
+            monitor_task = asyncio.create_task(self._monitor_process_memory(process, test_index))
+            
+            try:
+                stdin_bytes = stdin_input.encode('utf-8') if stdin_input else None
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input=stdin_bytes),
+                    timeout=timeout
+                )
+                return process, stdout, stderr
+            finally:
+                monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            await self._cleanup_process(process, test_index)
+            try:
+                os.unlink(temp_file)
+            except (OSError, FileNotFoundError):
+                pass
+            gc.collect()
+    
+    async def _cleanup_process(self, process, test_index: int):
+        """Clean up subprocess aggressively"""
+        if not process:
+            return
+        
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, AttributeError, OSError):
+            pass
+        
+        try:
+            process.kill()
+        except (ProcessLookupError, PermissionError):
+            pass
+        
+        try:
+            await asyncio.wait_for(process.wait(), timeout=1.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"Test {test_index}: Cleanup timeout for PID {process.pid}")
+        
+        # Extra cleanup: ensure no zombie processes
+        try:
+            import subprocess
+            subprocess.run(['pkill', '-9', '-P', str(process.pid)], capture_output=True, timeout=1)
+        except:
+            pass
     
     async def _run_stdin_test(
         self,
@@ -297,100 +355,35 @@ class CodeTask:
         timeout: int,
         test_index: int
     ) -> bool:
-        """
-        Run a single stdin/stdout test case in a subprocess
-        
-        Args:
-            code: Python code to execute
-            stdin_input: Input to provide via stdin
-            expected_output: Expected output string or value
-            timeout: Timeout in seconds
-            test_index: Index of the test (for logging)
-        
-        Returns:
-            True if test passed, False otherwise
-        """
-        # Add BASE_IMPORTS to code
-        full_code = f"{BASE_IMPORTS}\n{code}"
-        
-        # Create temporary file for code
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            f.write(full_code)
-            temp_file = f.name
-        
-        process = None
+        """Run stdin/stdout test case"""
         try:
-            # Start subprocess
-            process = await asyncio.create_subprocess_exec(
-                'python3', temp_file,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                # Set resource limits
-                preexec_fn=lambda: self._set_process_limits() if hasattr(os, 'setrlimit') else None
+            process, stdout, stderr = await self._run_test_subprocess(
+                code, timeout, test_index, stdin_input
             )
             
-            try:
-                # Run with timeout
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=stdin_input.encode('utf-8')),
-                    timeout=timeout
-                )
-                
-                # Check exit code
-                if process.returncode != 0:
-                    logger.debug(f"Test {test_index}: Non-zero exit code {process.returncode}")
-                    if stderr:
-                        logger.debug(f"Test {test_index}: stderr: {stderr.decode('utf-8', errors='ignore')[:200]}")
-                    return False
-                
-                # Compare output using flexible comparison
-                actual_output = stdout.decode('utf-8', errors='ignore')
-                expected_str = str(expected_output) if not isinstance(expected_output, str) else expected_output
-                
-                if compare_stdout_results(actual_output, expected_str):
-                    return True
-                else:
-                    logger.debug(f"Test {test_index}: Output mismatch")
-                    logger.debug(f"Expected: {expected_str[:200]}")
-                    logger.debug(f"Got: {actual_output.strip()[:200]}")
-                    return False
-                    
-            except asyncio.TimeoutError:
-                logger.debug(f"Test {test_index}: Timeout after {timeout}s")
-                # Kill process group to ensure all child processes are terminated
-                if process and process.returncode is None:
-                    try:
-                        # Try to kill process group first
-                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError, AttributeError):
-                        pass
-                    
-                    try:
-                        # Also try direct kill
-                        process.kill()
-                        await process.wait()
-                    except (ProcessLookupError, PermissionError):
-                        pass
+            if process.returncode == -9:
+                logger.warning(f"Test {test_index}: Killed by memory monitor")
                 return False
-                
-        except Exception as e:
-            logger.debug(f"Test {test_index}: Exception during execution: {e}")
-            return False
-        finally:
-            # Ensure process is terminated
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except (ProcessLookupError, PermissionError):
-                    pass
             
-            # Clean up temporary file
-            try:
-                os.unlink(temp_file)
-            except OSError:
-                pass
+            if process.returncode != 0:
+                logger.debug(f"Test {test_index}: Exit code {process.returncode}")
+                return False
+            
+            actual = stdout.decode('utf-8', errors='ignore')
+            expected = str(expected_output) if not isinstance(expected_output, str) else expected_output
+            
+            if compare_stdout_results(actual, expected):
+                return True
+            
+            logger.debug(f"Test {test_index}: Output mismatch")
+            return False
+            
+        except asyncio.TimeoutError:
+            logger.debug(f"Test {test_index}: Timeout")
+            return False
+        except Exception as e:
+            logger.debug(f"Test {test_index}: Exception - {e}")
+            return False
     
     async def _run_function_test(
         self,
@@ -401,153 +394,114 @@ class CodeTask:
         timeout: int,
         test_index: int
     ) -> bool:
-        """
-        Run a single function-based test case
-        
-        Args:
-            code: Python code containing the function
-            fn_name: Name of the function to call
-            test_input: Input to pass to the function
-            expected_output: Expected return value
-            timeout: Timeout in seconds
-            test_index: Index of the test (for logging)
-        
-        Returns:
-            True if test passed, False otherwise
-        """
-        # Add BASE_IMPORTS to code first (matching original project)
-        full_code = f"{BASE_IMPORTS}\n{code}"
-        
-        # Convert test_input to string format if it's a list (matching original project)
-        if isinstance(test_input, list):
-            test_input_str = "\n".join(str(k) for k in test_input)
-        else:
-            test_input_str = str(test_input)
-        
-        # Generate wrapper script (pass string format)
-        wrapper_code = generate_function_wrapper(full_code, fn_name, test_input_str)
-        
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            f.write(wrapper_code)
-            temp_file = f.name
-        
-        process = None
+        """Run function-based test case"""
         try:
-            # Start subprocess
-            process = await asyncio.create_subprocess_exec(
-                'python3', temp_file,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                preexec_fn=lambda: self._set_process_limits() if hasattr(os, 'setrlimit') else None
+            # Prepare wrapper code
+            test_input_str = "\n".join(str(k) for k in test_input) if isinstance(test_input, list) else str(test_input)
+            wrapper_code = generate_function_wrapper(f"{BASE_IMPORTS}\n{code}", fn_name, test_input_str)
+            
+            process, stdout, stderr = await self._run_test_subprocess(
+                wrapper_code.replace(f"{BASE_IMPORTS}\n", ""),  # Remove duplicate BASE_IMPORTS
+                timeout, test_index
             )
             
-            try:
-                # Run with timeout
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout
-                )
-                
-                # Check exit code
-                if process.returncode != 0:
-                    logger.debug(f"Test {test_index}: Non-zero exit code {process.returncode}")
-                    if stderr:
-                        logger.debug(f"Test {test_index}: stderr: {stderr.decode('utf-8', errors='ignore')[:200]}")
-                    return False
-                
-                # Parse JSON output
-                try:
-                    output_str = stdout.decode('utf-8', errors='ignore').strip()
-                    result_data = json.loads(output_str)
-                    
-                    if not result_data.get("success", False):
-                        error_msg = result_data.get('error', 'unknown')
-                        logger.debug(f"Test {test_index}: Execution failed: {error_msg}")
-                        return False
-                    
-                    exec_outputs = result_data["result"]
-                    
-                    # Parse expected_output from JSON string (double-encoded in dataset)
-                    # First json.loads() to get the stored value, then check if it needs another parse
-                    test_case_outputs = json.loads(expected_output)
-                    if isinstance(test_case_outputs, str):
-                        # Dataset stores JSON strings as double-encoded, need another parse
-                        try:
-                            test_case_outputs = json.loads(test_case_outputs)
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    
-                    # Apply original project's comparison logic (code_exec.py Line 159-177)
-                    if isinstance(exec_outputs, tuple):
-                        exec_outputs = list(exec_outputs)
-                    
-                    tmp_result = exec_outputs == test_case_outputs
-                    if isinstance(test_case_outputs, list):
-                        tmp_result = tmp_result or (exec_outputs == test_case_outputs[0])
-                    
-                    # ground truth sequences are not tuples
-                    try:
-                        if isinstance(exec_outputs[0], tuple):
-                            exec_outputs = [list(x) for x in exec_outputs]
-                            tmp_result = tmp_result or (exec_outputs == test_case_outputs[0])
-                    except:
-                        pass
-                    
-                    if tmp_result:
-                        return True
-                    else:
-                        logger.debug(f"Test {test_index}: Result mismatch")
-                        logger.debug(f"Expected: {test_case_outputs} (type={type(test_case_outputs)})")
-                        logger.debug(f"Got: {exec_outputs} (type={type(exec_outputs)})")
-                        return False
-                    
-                except json.JSONDecodeError as e:
-                    logger.debug(f"Test {test_index}: Failed to parse output: {e}")
-                    logger.debug(f"Output was: {output_str[:300]}")
-                    return False
-                    
-            except asyncio.TimeoutError:
-                logger.debug(f"Test {test_index}: Timeout after {timeout}s")
-                if process and process.returncode is None:
-                    try:
-                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError, AttributeError):
-                        pass
-                    try:
-                        process.kill()
-                        await process.wait()
-                    except (ProcessLookupError, PermissionError):
-                        pass
+            if process.returncode == -9:
+                logger.warning(f"Test {test_index}: Killed by memory monitor")
                 return False
-                
-        except Exception as e:
-            logger.debug(f"Test {test_index}: Exception during execution: {e}")
-            return False
-        finally:
-            # Ensure process is terminated
-            if process and process.returncode is None:
+            
+            if process.returncode != 0:
+                logger.debug(f"Test {test_index}: Exit code {process.returncode}")
+                return False
+            
+            # Parse and compare results
+            result_data = json.loads(stdout.decode('utf-8', errors='ignore').strip())
+            if not result_data.get("success", False):
+                logger.debug(f"Test {test_index}: Execution failed")
+                return False
+            
+            exec_outputs = result_data["result"]
+            test_case_outputs = json.loads(expected_output)
+            if isinstance(test_case_outputs, str):
                 try:
-                    process.kill()
-                    await process.wait()
-                except (ProcessLookupError, PermissionError):
+                    test_case_outputs = json.loads(test_case_outputs)
+                except (json.JSONDecodeError, TypeError):
                     pass
             
-            # Clean up temporary file
+            # Comparison logic
+            if isinstance(exec_outputs, tuple):
+                exec_outputs = list(exec_outputs)
+            
+            if exec_outputs == test_case_outputs:
+                return True
+            if isinstance(test_case_outputs, list) and exec_outputs == test_case_outputs[0]:
+                return True
+            
             try:
-                os.unlink(temp_file)
-            except OSError:
+                if isinstance(exec_outputs[0], tuple):
+                    exec_outputs = [list(x) for x in exec_outputs]
+                    if exec_outputs == test_case_outputs[0]:
+                        return True
+            except:
                 pass
+            
+            logger.debug(f"Test {test_index}: Result mismatch")
+            return False
+            
+        except asyncio.TimeoutError:
+            logger.debug(f"Test {test_index}: Timeout")
+            return False
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.debug(f"Test {test_index}: Parse error - {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"Test {test_index}: Exception - {e}")
+            return False
+    
+    async def _monitor_process_memory(self, process, test_index: int):
+        """Monitor subprocess memory and kill if exceeds limit"""
+        try:
+            import psutil
+            await asyncio.sleep(0.2)
+            
+            try:
+                proc = psutil.Process(process.pid)
+            except psutil.NoSuchProcess:
+                return
+            
+            while True:
+                try:
+                    if not proc.is_running():
+                        return
+                    
+                    rss_mb = proc.memory_info().rss / 1024 / 1024
+                    
+                    if rss_mb > SUBPROCESS_MEMORY_LIMIT_MB:
+                        logger.warning(
+                            f"Test {test_index}: Memory limit exceeded - "
+                            f"PID={process.pid} RSS={rss_mb:.1f}MB > {SUBPROCESS_MEMORY_LIMIT_MB}MB"
+                        )
+                        proc.kill()
+                        return
+                    
+                    await asyncio.sleep(0.2)
+                    
+                except psutil.NoSuchProcess:
+                    return
+                except Exception as e:
+                    logger.error(f"Test {test_index}: Monitor error: {e}")
+                    return
+                    
+        except ImportError:
+            logger.warning("psutil not available, memory monitoring disabled")
+        except Exception as e:
+            logger.error(f"Test {test_index}: Monitor failed to start: {e}")
     
     @staticmethod
     def _set_process_limits():
-        """Set resource limits for subprocess to prevent resource exhaustion"""
+        """Set resource limits for subprocess"""
         try:
             import resource
-            # Limit virtual memory to 10GB
-            resource.setrlimit(resource.RLIMIT_AS, (10 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024))
-            # Limit CPU time to prevent infinite loops
             resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
         except (ImportError, OSError):
             pass
