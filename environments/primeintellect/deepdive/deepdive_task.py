@@ -45,9 +45,6 @@ class DeepDiveTask:
         dataset_test_size: float = 0.1,
         dataset_seed: int = 2025,
         serper_api_key: str = None,
-        judge_api_key: str = None,
-        judge_model: str = "gpt-4o-mini",
-        judge_base_url: str = None,
         max_turns: int = 32,
         max_search_results: int = 10,
         max_response_chars: int = 20_000,
@@ -64,9 +61,6 @@ class DeepDiveTask:
             dataset_test_size: Test split size
             dataset_seed: Random seed for split
             serper_api_key: Serper API key
-            judge_api_key: Judge model API key
-            judge_model: Judge model name
-            judge_base_url: Judge model base URL
             max_turns: Maximum conversation turns
             max_search_results: Maximum search results per query
             max_response_chars: Maximum response characters
@@ -97,9 +91,6 @@ class DeepDiveTask:
         
         # Store configuration
         self.serper_api_key = serper_api_key or os.getenv("SERPER_API_KEY")
-        self.judge_api_key = judge_api_key or os.getenv("OPENAI_API_KEY")
-        self.judge_model = judge_model
-        self.judge_base_url = judge_base_url
         self.max_turns = max_turns
         self.max_search_results = max_search_results
         self.max_response_chars = max_response_chars
@@ -109,24 +100,6 @@ class DeepDiveTask:
         
         if not self.serper_api_key:
             raise ValueError("Missing Serper API key. Set SERPER_API_KEY environment variable.")
-        
-        # Initialize judge client
-        httpx_timeout = httpx.Timeout(1200)
-        httpx_limits = httpx.Limits(max_connections=8192, max_keepalive_connections=8192)
-        httpx_client = httpx.AsyncClient(limits=httpx_limits, timeout=httpx_timeout)
-        self.judge_client = AsyncOpenAI(
-            base_url=self.judge_base_url,
-            api_key=self.judge_api_key if self.judge_api_key else "EMPTY",
-            http_client=httpx_client,
-        )
-        
-        # Setup judge rubric
-        maybe_think_parser = vf.MaybeThinkParser(extract_fn=extract_boxed_answer)
-        self.judge_rubric = JudgeRubric(
-            judge_client=self.judge_client,
-            judge_model=self.judge_model,
-            parser=maybe_think_parser,
-        )
         
         # Rate limiting primitives
         self.concurrency_semaphore = asyncio.Semaphore(128)
@@ -161,22 +134,47 @@ class DeepDiveTask:
         )
     
     @with_rate_limit_retry
-    async def _judge_with_rubric(self, question: str, completion: list, response: str, state: dict, **kwargs):
+    async def _judge_with_rubric(self, question: str, completion: list, response: str, state: dict, judge_rubric, **kwargs):
         """Use JudgeRubric to evaluate answer (matches original implementation)"""
-        judge_response = await self.judge_rubric.judge(question, completion, response, state, **kwargs)
+        judge_response = await judge_rubric.judge(question, completion, response, state, **kwargs)
         return judge_response
     
-    async def evaluate(self, response: str, challenge: Challenge) -> tuple[float, dict]:
+    async def evaluate(
+        self,
+        response: str,
+        challenge: Challenge,
+        judge_model: str = None,
+        judge_base_url: str = None,
+        judge_api_key: str = None
+    ) -> tuple[float, dict]:
         """
         Evaluate response using judge model (matches original judge_reward_func logic)
         
         Args:
             response: Model response (can be string or conversation)
             challenge: Original challenge
+            judge_model: Override judge model for this evaluation
+            judge_base_url: Override judge base URL for this evaluation
+            judge_api_key: Override judge API key for this evaluation
         
         Returns:
             Tuple of (score, extra_info)
         """
+        # Create judge client with custom configuration
+        api_key = judge_api_key or os.getenv("CHUTES_API_KEY", "EMPTY")
+        httpx_timeout = httpx.Timeout(1200)
+        httpx_limits = httpx.Limits(max_connections=8192, max_keepalive_connections=8192)
+        httpx_client = httpx.AsyncClient(limits=httpx_limits, timeout=httpx_timeout)
+        judge_client = AsyncOpenAI(base_url=judge_base_url, api_key=api_key, http_client=httpx_client)
+        
+        # Setup judge rubric
+        maybe_think_parser = vf.MaybeThinkParser(extract_fn=extract_boxed_answer)
+        judge_rubric = JudgeRubric(
+            judge_client=judge_client,
+            judge_model=judge_model,
+            parser=maybe_think_parser,
+        )
+        
         # Setup state matching original implementation
         state = {"info": challenge.extra}
         
@@ -204,7 +202,8 @@ class DeepDiveTask:
                     challenge.extra["raw_question"],
                     completion,
                     final_response,
-                    state
+                    state,
+                    judge_rubric
                 )
         
         try:

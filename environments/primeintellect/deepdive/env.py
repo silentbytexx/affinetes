@@ -20,7 +20,7 @@ class Actor:
     
     def __init__(
         self,
-        api_key: str = None,
+        api_key: str = None
     ):
         """
         Initialize Actor with API key
@@ -30,12 +30,10 @@ class Actor:
         """
         self.api_key = api_key or os.getenv("CHUTES_API_KEY")
         
-        # Initialize DeepDive task instance
+        # Initialize DeepDive task instance once to avoid reloading dataset
+        # Judge configuration will be passed per-evaluation
         self.deepdive_task = DeepDiveTask(
             serper_api_key=os.getenv("SERPER_API_KEY"),
-            judge_api_key=os.getenv("OPENAI_API_KEY"),
-            judge_model=os.getenv("JUDGE_MODEL", "gpt-4o-mini"),
-            judge_base_url=os.getenv("JUDGE_BASE_URL"),
         )
     
     async def _llm_chat(self, prompt, model, base_url, timeout, temperature, current_api_key, seed=None):
@@ -99,7 +97,10 @@ class Actor:
         temperature=0.7,
         api_key: str = None,
         seed: int = None,
-        task_id: int = None
+        task_id: int = None,
+        judge_model: str = "deepseek-ai/DeepSeek-V3.2-Speciale",
+        judge_base_url: str = "https://llm.chutes.ai/v1",
+        judge_api_key: str = None
     ):
         """
         Run evaluation on a single DeepDive task
@@ -114,6 +115,9 @@ class Actor:
             task_id: Optional task ID for deterministic task selection.
                      If provided, used as index into dataset.
                      If not provided, random sample is selected.
+            judge_model: Judge model for LLM-based evaluation. Defaults to "deepseek-ai/DeepSeek-V3.2-Speciale"
+            judge_base_url: Base URL for judge API. Defaults to "https://llm.chutes.ai/v1"
+            judge_api_key: API key for judge model. Defaults to self.api_key
         """
         # Generate random seed if not provided
         if seed is None:
@@ -121,6 +125,9 @@ class Actor:
 
         # Allow per-call api_key override
         current_api_key = api_key or self.api_key
+
+        if judge_api_key is None:
+            judge_api_key = current_api_key
         
         start = time.time()
         
@@ -141,12 +148,18 @@ class Actor:
             resp = None
             error = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
         
-        # Evaluate
+        # Evaluate with judge configuration
         score = 0.0
         judge_info = {}
         if resp:
             try:
-                score, judge_info = await self.deepdive_task.evaluate(resp, challenge)
+                score, judge_info = await self.deepdive_task.evaluate(
+                    resp,
+                    challenge,
+                    judge_model=judge_model,
+                    judge_base_url=judge_base_url,
+                    judge_api_key=judge_api_key
+                )
             except Exception as e:
                 import traceback
                 error = f"Evaluation error: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
