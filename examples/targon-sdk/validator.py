@@ -30,30 +30,59 @@ app = targon.App("affine", image=image)
 
 
 @app.function(
-    resource=targon.Compute.H200_MEDIUM, timeout=3600, min_replicas=1, max_replicas=1
+    resource=targon.Compute.H200_SMALL, max_replicas=1
 )
-@targon.concurrent(max_concurrency=1, target_concurrency=1)
-def run(
+def sample(
     model_name: str,
-    task_ids: list[int],
+    image: str,
     *,
-    image: str = "docker.io/affinefoundation/mth:pi",
-    sglang_port: int = 30000,
+    task_id_start: int = 1,
+    task_id_end: int = 10,
+    task_ids: list[int] = None,
+    llm_port: int = 30000,
     timeout: int = 1800,
 ) -> Dict[str, Any]:
     """
-    Run Math reasoning evaluations using affinetes environment
-
+    Targon serverless function which accepts model M and environment E
+    
+    This function can be queried as: sample(M, E, task_id_start, task_id_end) -> List[Dict]
+    Returns samples from environment E using model M with affinetes + sglang
+    
     Args:
-        model_name: Model name for evaluation
-        task_ids: List of task IDs to evaluate
-        image: Affinetes environment image to use
-        sglang_port: Port for SGLang service
+        model_name: Model name (M) for evaluation
+        image: Affinetes environment image (E) to use
+        task_id_start: Start of task ID range (inclusive, default: 1)
+        task_id_end: End of task ID range (inclusive, default: 10)
+        task_ids: List of specific task IDs (optional, overrides range if provided)
+        llm_port: Port for LLM service (vLLM or SGLang)
         timeout: Timeout per task in seconds
+        
+    Returns:
+        Dictionary containing evaluation results
+        
+    Examples:
+        # Sample tasks from range 1-100
+        sample("Qwen/Qwen2.5-7B-Instruct", "docker.io/affinefoundation/mth:pi",
+               task_id_start=1, task_id_end=100)
+        
+        # Sample specific task IDs
+        sample("Qwen/Qwen2.5-7B-Instruct", "docker.io/affinefoundation/mth:pi",
+               task_ids=[1, 5, 10, 15, 20])
     """
     import subprocess
     import asyncio
+    import random
     import affinetes as af
+
+    # Determine task IDs based on input parameters
+    if task_ids is not None:
+        # Use explicit task IDs if provided
+        final_task_ids = task_ids
+    else:
+        # Generate task IDs from range
+        final_task_ids = list(range(task_id_start, task_id_end + 1))
+    
+    print(f"Selected {len(final_task_ids)} task IDs: {final_task_ids[:10]}{'...' if len(final_task_ids) > 10 else ''}")
 
     # Start Docker daemon (DIND)
     print("Starting Docker daemon...")
@@ -67,7 +96,7 @@ def run(
     time.sleep(10)
 
     # Start SGLang service
-    print(f"Starting SGLang service on port {sglang_port}...")
+    print(f"Starting SGLang service on port {llm_port}...")
     sglang_process = subprocess.Popen(
         [
             "python",
@@ -76,7 +105,7 @@ def run(
             "--model-path",
             model_name,
             "--port",
-            str(sglang_port),
+            str(llm_port),
             "--host",
             "0.0.0.0",
             "--chat-template",
@@ -91,12 +120,11 @@ def run(
 
     try:
         # Construct base URL for SGLang service
-        llm_base_url = f"http://localhost:{sglang_port}/v1"
+        llm_base_url = f"http://localhost:{llm_port}/v1"
         print(f"base URL: {llm_base_url}")
 
         # Load affinetes environment with host network mode
         # This allows the container to access sglang service on host network
-        # Use custom port to avoid conflicts (default is 8000)
         print(f"Loading environment from affinetes...")
 
         async def run_evaluation():
@@ -133,7 +161,7 @@ def run(
                     }
 
             results = await asyncio.gather(
-                *[evaluate_task(task_id) for task_id in task_ids]
+                *[evaluate_task(task_id) for task_id in final_task_ids]
             )
             return list(results)
 
@@ -147,9 +175,11 @@ def run(
 
         return {
             "model_name": model_name,
-            "total_tasks": len(task_ids),
+            "environment_image": image,
+            "task_id_range": {"start": task_id_start, "end": task_id_end} if task_id_start else None,
+            "total_tasks": len(final_task_ids),
             "successful_tasks": len(successful_tasks),
-            "failed_tasks": len(task_ids) - len(successful_tasks),
+            "failed_tasks": len(final_task_ids) - len(successful_tasks),
             "average_score": avg_score,
             "total_score": total_score,
             "results": results,
@@ -173,43 +203,62 @@ def run(
 @app.local_entrypoint()
 async def main(
     model_name: str,
-    task_ids: str = "1,2",
     image: str = "docker.io/affinefoundation/mth:pi",
-    sglang_port: int = 30000,
+    task_id_start: int = 1,
+    task_id_end: int = 10,
+    task_ids: str = None,
+    llm_port: int = 30000,
     timeout: int = 1800,
 ) -> Dict[str, Any]:
     """
-    Run the validator remotely
+    Run the serverless sample function remotely
     
     Usage:
+        # Sample tasks from range 1-100
         targon run examples/targon-sdk/validator.py \
             --model-name "Qwen/Qwen2.5-7B-Instruct" \
-            --task-ids "1,2,3,4,5,6,7,8,9,10" \
-            --image "docker.io/affinefoundation/mth:pi"
+            --image "docker.io/affinefoundation/mth:pi" \
+            --task-id-start 1 \
+            --task-id-end 100
+        
+        # Sample specific task IDs
+        targon run examples/targon-sdk/validator.py \
+            --model-name "Qwen/Qwen2.5-7B-Instruct" \
+            --image "docker.io/affinefoundation/mth:pi" \
+            --task-ids "1,5,10,15,20"
     
     Args:
         model_name: Model name for evaluation
-        task_ids: Comma-separated task IDs (e.g., "1,2,3,4,5,6,7,8,9,10")
         image: Affinetes environment image to use
-        sglang_port: Port for SGLang service (default: 30000)
+        task_id_start: Start of task ID range (inclusive, default: 1)
+        task_id_end: End of task ID range (inclusive, default: 10)
+        task_ids: Comma-separated task IDs (e.g., "1,5,10,15,20", optional)
+        llm_port: Port for LLM service (default: 30000)
         timeout: Timeout per task in seconds
     """
-    # Parse task IDs
-    task_id_list = [int(x.strip()) for x in task_ids.split(",")]
+    # Parse task IDs if provided as string
+    task_id_list = None
+    if task_ids:
+        task_id_list = [int(x.strip()) for x in task_ids.split(",")]
 
     print(f"Starting evaluation:")
     print(f"  Model: {model_name}")
     print(f"  Image: {image}")
-    print(f"  SGLang Port: {sglang_port}")
-    print(f"  Task IDs: {task_id_list}")
+    if task_id_list:
+        print(f"  Task IDs: {task_id_list}")
+    else:
+        print(f"  Task ID Range: {task_id_start} - {task_id_end}")
+    print(f"  LLM Port: {llm_port}")
     print(f"  Timeout: {timeout}s")
     print()
 
-    result = await run.remote(
+    result = await sample.remote(
         model_name=model_name,
-        task_ids=task_id_list,
         image=image,
-        sglang_port=sglang_port,
+        task_id_start=task_id_start,
+        task_id_end=task_id_end,
+        task_ids=task_id_list,
+        llm_port=llm_port,
         timeout=timeout,
     )
 
