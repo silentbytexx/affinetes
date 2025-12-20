@@ -10,6 +10,7 @@ from open_spiel.python.bots import uniform_random
 from open_spiel.python.algorithms import mcts
 import openai
 import httpx
+import pyspiel
 
 from llm_bot import LLMBot
 from game_config import create_game
@@ -141,8 +142,8 @@ class Actor:
             )
 
             llm_return = returns[llm_player_id]
-            # Binary scoring: only win (return=1) gets score=1, others get score=0
-            score = 1.0 if llm_return > 0.5 else 0.0
+            # Compute score using game-type-aware logic
+            score = self._compute_score(returns, llm_player_id, game)
 
             return self._build_result(
                 game_name=game_config["game_name"],
@@ -156,6 +157,7 @@ class Actor:
                 conversation=llm_bot.get_conversation(),
                 error=llm_bot.get_last_error(),
                 usage=llm_bot.get_total_usage(),
+                all_returns=returns,
             )
 
         except Exception as e:
@@ -173,6 +175,69 @@ class Actor:
                 conversation=[],
                 error=f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}",
             )
+
+    def _compute_score(self, returns, llm_player_idx, game):
+        """
+        Compute normalized score [0.0, 1.0] from OpenSpiel returns.
+        
+        This method respects the game type (zero-sum, general-sum, etc.)
+        to properly convert raw returns into a meaningful score.
+        
+        Args:
+            returns: Terminal returns from state.returns()
+            llm_player_idx: Index of LLM player
+            game: OpenSpiel game object
+        
+        Returns:
+            Normalized score in [0.0, 1.0]
+        """
+        num_players = len(returns)
+        llm_return = returns[llm_player_idx]
+        game_type = game.get_type()
+        
+        # Zero-sum games (e.g., Chess, Poker): returns are in game's utility range
+        if game_type.utility == pyspiel.GameType.Utility.ZERO_SUM:
+            # Normalize from [min_utility, max_utility] to [0, 1]
+            # Example: Chess has [-1, 1] → Loss:-1→0.0, Draw:0→0.5, Win:1→1.0
+            min_utility = game.min_utility()
+            max_utility = game.max_utility()
+            if max_utility > min_utility:
+                score = (llm_return - min_utility) / (max_utility - min_utility)
+            else:
+                score = 0.5  # Degenerate case
+            return float(score)
+        
+        # Multi-player games (3-4 players): use ranking-based scoring
+        if num_players > 2:
+            # Rank players by returns (higher return = better performance)
+            sorted_returns = sorted(returns, reverse=True)
+            llm_rank = sorted_returns.index(llm_return)
+            
+            # Convert rank to score: 1st→1.0, 2nd→0.67, 3rd→0.33, 4th→0.0
+            # This preserves discrimination between different ranks
+            score = 1.0 - (llm_rank / (num_players - 1))
+            return float(score)
+        
+        # 2-player non-zero-sum games: compare relative performance
+        if num_players == 2:
+            opponent_return = returns[1 - llm_player_idx]
+            
+            # Determine winner by comparing returns (higher is better)
+            if llm_return > opponent_return:
+                return 1.0
+            elif llm_return < opponent_return:
+                return 0.0
+            else:
+                return 0.5  # Tie
+        
+        # Fallback: normalize by game's utility range (for unusual game types)
+        min_utility = game.min_utility()
+        max_utility = game.max_utility()
+        if max_utility > min_utility:
+            score = (llm_return - min_utility) / (max_utility - min_utility)
+        else:
+            score = 0.5
+        return float(score)
 
     def _create_opponent_bot(self, opponent, player_id, seed):
         """Create opponent bot based on type"""
@@ -207,6 +272,7 @@ class Actor:
         conversation,
         error=None,
         usage=None,
+        all_returns=None,
     ):
         """Build result dictionary"""
         result = {
@@ -222,6 +288,7 @@ class Actor:
                 "opponent_type": opponent,
                 "llm_player_id": llm_player_id,
                 "final_return": llm_return,
+                "all_returns": all_returns,
                 "usage": usage
                 or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             },
