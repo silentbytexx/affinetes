@@ -2,6 +2,9 @@
 
 Deploy LLM service and affinetes evaluation environment on Basilica GPU.
 
+[![demo](https://github.com/user-attachments/assets/e3a0e71b-d545-4946-8bbc-aa72179b0be4)](https://asciinema.org/a/eCspXmImKzKeSD4yp2itdESlg)
+
+
 ## Prerequisites
 
 1. Basilica API token (set as `BASILICA_API_TOKEN`)
