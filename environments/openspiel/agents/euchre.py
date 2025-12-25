@@ -52,3 +52,7 @@ PLAY STRATEGY:
             "allow_lone_defender": (variant & 1) == 1,
             "stick_the_dealer": (variant & 2) == 2
         }
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """4 players, 24 cards, 5 tricks. MaxGameLength=25. Medium complexity trick-taking."""
+        return (1000, 100)

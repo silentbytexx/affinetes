@@ -37,3 +37,7 @@ NOTE: This evaluation has a maximum turn limit to ensure completion."""
         Chess parameter generation
         """
         return {}
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """8×8 board, 4674 actions, MaxGameLength=17695. Extremely complex game."""
+        return (200, 20)

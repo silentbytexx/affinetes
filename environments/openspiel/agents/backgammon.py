@@ -46,3 +46,11 @@ STRATEGY TIPS:
         Config space: 1 variant (standard rules)
         """
         return {}
+    
+    def get_mcts_config(self) -> tuple:
+        """
+        Backgammon: 24 points, 15 checkers/player, 1352 actions
+        MaxGameLength: 1500, Complex movement logic + dice randomness
+        Config: (1000, 100) - Medium complexity
+        """
+        return (1000, 100)

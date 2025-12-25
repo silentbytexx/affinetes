@@ -35,3 +35,7 @@ Winning: Player with most completed boxes when all lines drawn wins."""
             "num_rows": grid_size,
             "num_cols": grid_size
         }
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """3×3 to 5×5 grid. MaxGameLength varies. Moderate tactical game."""
+        return (1200, 100)

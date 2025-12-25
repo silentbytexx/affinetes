@@ -89,3 +89,7 @@ Winning: Beat dealer's total without exceeding 21. If you exceed 21, you bust an
     def generate_params(self, config_id: int) -> Dict[str, Any]:
         """Blackjack parameter generation - standard configuration"""
         return {}
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """Single player vs dealer. MaxGameLength=12. Simple probability game, no MCTS needed."""
+        return None

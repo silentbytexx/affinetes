@@ -55,3 +55,7 @@ CARD NOTATION:
         # Available params: depth_limit, is_colored, players
         # Use default configuration for reproducible gameplay
         return {}
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """Single-player card sequencing. No opponent, MCTS not applicable."""
+        return None

@@ -5,6 +5,7 @@ import time
 import random
 import numpy as np
 import asyncio
+import concurrent.futures
 from open_spiel.python.algorithms import evaluate_bots
 from open_spiel.python.bots import uniform_random
 from open_spiel.python.algorithms import mcts
@@ -17,8 +18,96 @@ from game_config import create_game
 from agents import GAME_AGENTS
 
 
+class SafeRandomRolloutEvaluator(mcts.Evaluator):
+    """
+    Safe MCTS evaluator that handles edge cases in Gin Rummy and similar games.
+    
+    Fixes the "ValueError: 'a' cannot be empty" error that occurs when
+    legal_actions() returns an empty list in non-terminal states.
+    """
+    
+    def __init__(self, n_rollouts=1, random_state=None):
+        """
+        Initialize evaluator
+        
+        Args:
+            n_rollouts: Number of random rollouts per evaluation
+            random_state: numpy RandomState for reproducibility
+        """
+        self._n_rollouts = n_rollouts
+        self._random_state = random_state or np.random.RandomState()
+    
+    def evaluate(self, state):
+        """
+        Evaluate state using random rollouts with safety checks
+        
+        Args:
+            state: OpenSpiel state to evaluate
+            
+        Returns:
+            List of returns for each player
+        """
+        # If terminal state, return actual returns
+        if state.is_terminal():
+            return state.returns()
+        
+        # Safety check: if no legal actions in non-terminal state
+        legal_actions = state.legal_actions()
+        if not legal_actions:
+            # This shouldn't happen in well-formed games, but Gin Rummy has edge cases
+            # Return current returns as approximation
+            return state.returns()
+        
+        # Perform n random rollouts
+        total_returns = np.zeros(state.num_players())
+        
+        for _ in range(self._n_rollouts):
+            working_state = state.clone()
+            
+            # Rollout until terminal
+            while not working_state.is_terminal():
+                legal_actions = working_state.legal_actions()
+                
+                # Safety check during rollout
+                if not legal_actions:
+                    # Edge case: non-terminal state with no legal actions
+                    # Break and use current returns
+                    break
+                
+                # Choose random action
+                action = self._random_state.choice(legal_actions)
+                working_state.apply_action(action)
+            
+            # Accumulate returns
+            total_returns += working_state.returns()
+        
+        # Return average returns across rollouts
+        return total_returns / self._n_rollouts
+    
+    def prior(self, state):
+        """
+        Return prior policy (uniform distribution over legal actions)
+        
+        Args:
+            state: OpenSpiel state
+            
+        Returns:
+            List of (action, probability) tuples
+        """
+        legal_actions = state.legal_actions()
+        
+        # Safety check
+        if not legal_actions:
+            return []
+        
+        # Uniform prior
+        prob = 1.0 / len(legal_actions)
+        return [(action, prob) for action in legal_actions]
+
+
 class Actor:
     """OpenSpiel evaluation wrapper"""
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=100)
 
     def __init__(self, api_key: str = None):
         """
@@ -114,6 +203,7 @@ class Actor:
                 ),
                 rng_seed=seed + 1,
                 agent=agent,
+                executor=self.executor,
             )
 
             # Create bots for all players
@@ -123,14 +213,17 @@ class Actor:
                     bots.append(llm_bot)
                 else:
                     opponent_bot = self._create_opponent_bot(
-                        opponent, player_id, seed + 2 + player_id, game
+                        opponent, player_id, seed + 2 + player_id, game, agent
                     )
                     bots.append(opponent_bot)
 
-            returns = evaluate_bots.evaluate_bots(
-                state=game.new_initial_state(),
-                bots=bots,
-                rng=np.random.RandomState(seed),
+            loop = asyncio.get_event_loop()
+            returns = await loop.run_in_executor(
+                self.executor,
+                evaluate_bots.evaluate_bots,
+                game.new_initial_state(),
+                bots,
+                np.random.RandomState(seed),
             )
 
             llm_return = returns[llm_player_id]
@@ -271,10 +364,9 @@ class Actor:
             score = 0.5
         return float(score)
 
-    def _create_opponent_bot(self, opponent, player_id, seed, game):
+    def _create_opponent_bot(self, opponent, player_id, seed, game, agent):
         """Create opponent bot based on type and game dynamics"""
         game_type = game.get_type()
-        
         # For simultaneous move games, MCTS doesn't work - fallback to random
         if game_type.dynamics == pyspiel.GameType.Dynamics.SIMULTANEOUS:
             return uniform_random.UniformRandomBot(
@@ -287,13 +379,25 @@ class Actor:
                 player_id=player_id, rng=np.random.RandomState(seed + 2)
             )
         elif opponent == "mcts":
-            evaluator = mcts.RandomRolloutEvaluator(
-                n_rollouts=10, random_state=np.random.RandomState(seed + 3)
+            # Get MCTS config from agent
+            mcts_config = agent.get_mcts_config()
+            
+            # If agent returns None, game doesn't need MCTS (e.g., single-player)
+            if mcts_config is None:
+                return uniform_random.UniformRandomBot(
+                    player_id=player_id, rng=np.random.RandomState(seed + 2)
+                )
+            
+            max_simulations, n_rollouts = mcts_config
+            
+            # Create a safe evaluator that handles edge cases
+            evaluator = SafeRandomRolloutEvaluator(
+                n_rollouts=n_rollouts, random_state=np.random.RandomState(seed + 3)
             )
             return mcts.MCTSBot(
                 game=game,
-                uct_c=2.0,
-                max_simulations=100,
+                uct_c=1.414,
+                max_simulations=max_simulations,
                 evaluator=evaluator,
                 random_state=np.random.RandomState(seed + 4),
             )

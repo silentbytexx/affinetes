@@ -30,3 +30,7 @@ Winning: Player with most discs when game ends wins."""
         Othello parameter generation
         """
         return {}
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """8×8 board, 64 actions, MaxGameLength=128. Medium complexity with large branching factor."""
+        return (1000, 100)

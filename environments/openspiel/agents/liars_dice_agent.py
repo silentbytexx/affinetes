@@ -191,3 +191,22 @@ Winning: If you call Liar and previous bid was false, opponent loses. If bid was
             "players": 2,
             "numdice": 5
         }
+    
+    def get_mcts_config(self) -> tuple:
+        """
+        Get MCTS configuration for Liar's Dice
+        
+        Complexity Analysis:
+        - 2 players, 5 dice each (10 total)
+        - Branching factor: ~15-30 bid options per turn
+        - Average game length: 5-10 moves
+        - Rollout cost: Very low (simple state, no complex calculations)
+        
+        Configuration:
+        - max_simulations: 5000 (very high, game is simple enough)
+        - n_rollouts: 200 (extensive evaluation for maximum strength)
+        
+        Returns:
+            tuple: (max_simulations, n_rollouts)
+        """
+        return (5000, 200)

@@ -39,3 +39,7 @@ Winning: Higher score wins."""
             "board_size": board_size,
             "komi": komi
         }
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """5×5 or 7×7 board. MaxGameLength=2×board². Very high complexity strategy game."""
+        return (300, 30)

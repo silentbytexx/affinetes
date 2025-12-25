@@ -68,3 +68,31 @@ IMPORTANT: Always respond with the action ID number ONLY, never card names."""
             "hand_size": 7 + hand_var,  # 7, 8, 9
             "knock_card": 10 - knock_var  # 10, 9, 8
         }
+    
+    def get_mcts_config(self) -> tuple:
+        """
+        Get MCTS configuration for Gin Rummy
+        
+        Complexity Analysis:
+        - 52-card deck, 7-10 cards per hand
+        - State space: >10^85 information states (astronomical!)
+        - Opponent hand combinations: 41C10 = 1,121,099,408 possibilities
+        - Branching factor: 10-15 actions per turn (discard + meld options)
+        - Average game length: 50-100 moves (MaxGameLength = 300)
+        - Rollout cost: Very high (complex meld calculations, huge state space)
+        
+        Token Consumption:
+        - From TEST_REPORT: 167.8k avg tokens (highest among all games)
+        - Indicates very long games with many interactions
+        
+        Configuration:
+        - max_simulations: 500 (reduced due to high complexity)
+        - n_rollouts: 50 (limited due to expensive rollouts)
+        
+        Time Estimate: ~1200 seconds (20 minutes) for typical game
+        Within 30-minute timeout but close to limit.
+        
+        Returns:
+            tuple: (max_simulations, n_rollouts)
+        """
+        return (500, 50)

@@ -36,3 +36,12 @@ Winning: First player to reach or exceed target score wins immediately."""
             "players": 2,
             "winscore": 20 + score_var * 10  # 20, 30, 40
         }
+    
+    def get_mcts_config(self) -> tuple:
+        """
+        Pig: 2 actions (Roll/Hold), 6-sided die
+        MaxGameLength: 1000 but typically 20-40 moves
+        Very simple game, can use highest MCTS strength
+        Config: (5000, 200)
+        """
+        return (5000, 200)

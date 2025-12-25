@@ -38,3 +38,7 @@ ACTIONS:
         # 2048 only supports max_tile parameter (2048, 4096, 8192, etc.)
         # Default to 2048 for standard gameplay
         return {}
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """Single-player 4×4 sliding puzzle. No opponent, MCTS not applicable."""
+        return None

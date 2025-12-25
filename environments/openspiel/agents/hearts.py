@@ -48,3 +48,7 @@ Card Rank: A (high) > K > Q > J > 10 > 9 > 8 > 7 > 6 > 5 > 4 > 3 > 2 (low)"""
             "jd_bonus": (variant & 2) == 2,
             "avoid_all_tricks_bonus": (variant & 4) == 4
         }
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """4 players, 52 cards, 13 tricks. MaxGameLength=64. Complex trick-taking game."""
+        return (500, 50)

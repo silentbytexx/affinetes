@@ -38,3 +38,7 @@ Losing: If you have no legal moves (no adjacent opponent pieces to capture), you
             "rows": board_size,
             "columns": board_size
         }
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """5×5 to 7×7 board, limited adjacent moves, MaxGameLength=rows×cols-1. Medium complexity."""
+        return (1500, 100)

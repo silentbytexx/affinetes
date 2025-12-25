@@ -41,3 +41,7 @@ Winning: First pawn to reach target edge wins."""
             "board_size": board_size,
             "wall_count": num_walls
         }
+    
+    def get_mcts_config(self) -> tuple[int, int]:
+        """7×7 or 9×9 board, wall placement strategy. MaxGameLength=4×board². Moderate complexity."""
+        return (800, 80)

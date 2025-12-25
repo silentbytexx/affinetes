@@ -38,6 +38,7 @@ class LLMBot(pyspiel.Bot):
         agent: BaseGameAgent,
         max_parsing_retries: int = DEFAULT_MAX_PARSING_RETRIES,
         max_api_retries: int = DEFAULT_MAX_API_RETRIES,
+        executor: concurrent.futures.ThreadPoolExecutor = None,
     ):
         """
         Initialize LLM Bot with conversation history support
@@ -50,6 +51,7 @@ class LLMBot(pyspiel.Bot):
             agent: BaseGameAgent for game-specific logic (REQUIRED)
             max_parsing_retries: Maximum parsing retry attempts
             max_api_retries: Maximum API call retry attempts
+            executor: Shared ThreadPoolExecutor for concurrent LLM calls
         """
         pyspiel.Bot.__init__(self)
         self._game = game
@@ -59,6 +61,7 @@ class LLMBot(pyspiel.Bot):
         self._max_parsing_retries = max_parsing_retries
         self._max_api_retries = max_api_retries
         self._agent = agent
+        self._executor = executor
 
         self._conversation: List[Dict[str, str]] = []
         self._system_prompt_generated = False
@@ -161,7 +164,11 @@ class LLMBot(pyspiel.Bot):
                     self._handle_api_failure(e)
 
     def _execute_llm_call(self) -> Tuple[str, Dict]:
-        """Execute LLM API call in thread with event loop management"""
+        """Execute LLM API call in thread with event loop management
+        
+        Uses shared global executor to enable concurrent LLM API calls
+        across multiple evaluate() invocations.
+        """
         def run_async():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -175,8 +182,13 @@ class LLMBot(pyspiel.Bot):
                 loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.close()
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(run_async).result()
+        # Use shared executor if provided, otherwise create temporary one
+        if self._executor:
+            return self._executor.submit(run_async).result()
+        else:
+            # Fallback for backward compatibility
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                return executor.submit(run_async).result()
 
     def _handle_api_failure(self, error: Exception):
         """Handle final API failure after all retries"""

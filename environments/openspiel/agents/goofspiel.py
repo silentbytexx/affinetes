@@ -64,3 +64,10 @@ Winning: Player with most points after all rounds wins."""
             "num_cards": 8 + cards_var * 2,  # 8, 10, 12, 14, 16
             "points_order": "random"
         }
+    
+    def get_mcts_config(self) -> tuple:
+        """
+        Goofspiel is a simultaneous-move game - MCTS not supported.
+        env.py automatically uses random bot for such games.
+        """
+        return None  # Not used
