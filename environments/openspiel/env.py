@@ -260,7 +260,7 @@ class Actor:
         except Exception as e:
             # Other exceptions - return accumulated data with error details
             import traceback
-            from llm_bot import ParsingError
+            from llm_bot import ParsingError, APIError
 
             error_type = type(e).__name__
             
@@ -281,6 +281,20 @@ class Actor:
                     error=None,  # No error field - this is a valid sample
                     usage=llm_bot.get_total_usage() if llm_bot else None,
                     all_returns=None,
+                )
+            
+            # APIError: LLM API call failed - record as error
+            if isinstance(e, APIError):
+                error_msg = llm_bot.get_last_error() if llm_bot and llm_bot.get_last_error() else str(e)
+                return self._build_error_result(
+                    game_name=game_name,
+                    error=error_msg,
+                    llm_bot=llm_bot,
+                    llm_player_id=llm_player_id,
+                    task_id=task_id,
+                    seed=seed,
+                    opponent=opponent,
+                    start_time=start_time,
                 )
             
             # Other exceptions: true errors

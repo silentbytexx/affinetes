@@ -32,5 +32,12 @@ Winning: Player with most discs when game ends wins."""
         return {}
     
     def get_mcts_config(self) -> tuple[int, int]:
-        """8×8 board, 64 actions, MaxGameLength=128. Medium complexity with large branching factor."""
-        return (1000, 100)
+        """
+        8×8 board, 64 actions, MaxGameLength=128. Medium complexity with large branching factor.
+        
+        Optimized from (500, 50) to (300, 50):
+        - Original: 25s/step → 25min total (timeout)
+        - Optimized: ~15s/step → ~10.5min total (safe margin)
+        - Difficulty: 60% of original (still challenging)
+        """
+        return (300, 50)

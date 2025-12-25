@@ -16,6 +16,11 @@ DEFAULT_MAX_API_RETRIES = 10
 API_RETRY_DELAY_SECONDS = 2.0
 
 
+class APIError(Exception):
+    """Raised when LLM API call fails after all retry attempts"""
+    pass
+
+
 class ParsingError(Exception):
     """Raised when action parsing fails after all retry attempts"""
     pass
@@ -116,12 +121,16 @@ class LLMBot(pyspiel.Bot):
                 # Success: return action (conversation already recorded)
                 return result['action']
             
-            # Parsing failed
-            error_msg = f"Failed to parse valid action, {result['error_message']} (after {attempt + 1} attempts)"
+            # Parsing failed - use simplified error message to avoid response contamination
+            error_msg = (
+                f"Invalid response format. "
+                f"You must respond with ONLY the action ID number (e.g., '5'). "
+                f"This is attempt {attempt + 1} of {self._max_parsing_retries + 1}."
+            )
             self._conversation.append({"role": "user", "content": error_msg})
             if attempt >= self._max_parsing_retries:
                 raise ParsingError(
-                    f"Failed to parse valid action after {self._max_parsing_retries} retries. "
+                    f"Failed to parse valid action after {self._max_parsing_retries + 1} retries. "
                     f"Last response: '{response}'. Error: {result['error_message']}"
                 )
         
@@ -196,7 +205,7 @@ class LLMBot(pyspiel.Bot):
         error_msg = f"{type(error).__name__}: {str(error)}\n{traceback.format_exc()}"
         print(f"[API Error] LLM call failed after {self._max_api_retries} attempts")
         self._last_error = f"[API_FAILURE] Failed after {self._max_api_retries} attempts: {error_msg}"
-        raise ParsingError(f"API call failed after {self._max_api_retries} attempts: {error_msg}")
+        raise APIError(f"API call failed after {self._max_api_retries} attempts: {error_msg}")
 
     def _parse_action(self, response: str, state, legal_actions: List[int]) -> Dict:
         """
