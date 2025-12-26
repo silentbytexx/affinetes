@@ -166,7 +166,15 @@ class LLMBot(pyspiel.Bot):
                     self._total_usage = usage.copy()
                 return response, usage
             except Exception as e:
-                if attempt < self._max_api_retries - 1:
+                # Check if this is a non-retryable error
+                error_str = str(e)
+                non_retryable_patterns = [
+                    "is longer than the model",  # Context length exceeded
+                ]
+                is_non_retryable = any(pattern in error_str for pattern in non_retryable_patterns)
+                if is_non_retryable:
+                    self._handle_api_failure(e)
+                elif attempt < self._max_api_retries - 1:
                     print(f"[API Retry {attempt + 1}/{self._max_api_retries}] LLM call failed: {e}, retrying...")
                     time.sleep(API_RETRY_DELAY_SECONDS)
                 else:
